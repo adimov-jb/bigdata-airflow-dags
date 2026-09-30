@@ -1,0 +1,14 @@
+logs/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# Variáveis com segredos; .env.local (valores de desenvolvimento) é versionado de propósito.
+.env
+.env.*
+!.env.local
+
+.DS_Store
+.idea/
+.vscode/

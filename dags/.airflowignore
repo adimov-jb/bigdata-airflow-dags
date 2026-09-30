@@ -1,0 +1,2 @@
+# Módulos auxiliares: importados pelas DAGs, mas não contêm DAGs.
+bigdata_pipeline/

@@ -1,0 +1,115 @@
+# Airflow local (LocalExecutor). Requer a plataforma do repositório Terraform no ar
+# (rede "bigdata") e as imagens bigdata-ingestion:local e bigdata-dbt:local.
+name: bigdata-airflow
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    target: runtime
+  image: bigdata-airflow:local
+  env_file: .env.local
+  user: "50000:0"
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+  networks: [default, bigdata]
+
+x-airflow-depends: &airflow-depends
+  postgres:
+    condition: service_healthy
+  airflow-init:
+    condition: service_completed_successfully
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Expõe só a parte da API do Docker que o DockerOperator usa (containers e imagens),
+  # em vez de montar o docker.sock inteiro dentro do Airflow.
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:v0.5.0
+    environment:
+      CONTAINERS: 1
+      IMAGES: 1
+      POST: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  airflow-init:
+    <<: *airflow-common
+    command: version
+    environment:
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  airflow-apiserver:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8080/api/v2/version"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    depends_on: *airflow-depends
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8974/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    depends_on:
+      <<: *airflow-depends
+      docker-proxy:
+        condition: service_started
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    depends_on: *airflow-depends
+
+  tests:
+    build:
+      context: .
+      target: test
+    image: bigdata-airflow:test
+    profiles: ["tools"]
+    env_file: .env.local
+    environment:
+      # Banco descartável: os testes não dependem do Postgres do Airflow.
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////tmp/airflow.db
+      # O Airflow real já coloca a pasta de DAGs no sys.path.
+      PYTHONPATH: /opt/airflow/dags
+    working_dir: /opt/airflow
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./tests:/opt/airflow/tests
+    network_mode: none
+    entrypoint: ["bash", "-c", "airflow db migrate >/dev/null && pytest -q -p no:cacheprovider tests"]
+
+volumes:
+  airflow-db:
+
+networks:
+  bigdata:
+    external: true

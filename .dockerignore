@@ -1,0 +1,5 @@
+.git
+logs
+dags
+tests
+.env*
