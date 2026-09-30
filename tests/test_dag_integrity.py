@@ -14,18 +14,31 @@ def dag_bag():
 
 
 @pytest.fixture
-def multi_source_dag(monkeypatch):
-    """A DAG montada com duas fontes configuradas."""
-    monkeypatch.setenv("BIGDATA_INGESTION_SOURCES", "open_meteo, outra_fonte")
-    monkeypatch.setenv("BIGDATA_DBT_SOURCES", "open_meteo")
-    importlib.reload(config)
-    try:
+def dag_bag_with_env(monkeypatch):
+    """Monta as DAGs com variáveis de ambiente alteradas; restaura a config no final."""
+
+    def build(set_env: dict[str, str] | None = None, unset_env: tuple[str, ...] = ()) -> DagBag:
+        for name, value in (set_env or {}).items():
+            monkeypatch.setenv(name, value)
+        for name in unset_env:
+            monkeypatch.delenv(name, raising=False)
+        importlib.reload(config)
         bag = DagBag(dag_folder=DAGS_FOLDER)
         assert bag.import_errors == {}
-        yield bag.get_dag("weather_pipeline")
-    finally:
-        monkeypatch.undo()
-        importlib.reload(config)
+        return bag
+
+    yield build
+    monkeypatch.undo()
+    importlib.reload(config)
+
+
+@pytest.fixture
+def multi_source_dag(dag_bag_with_env):
+    """A DAG montada com duas fontes configuradas."""
+    bag = dag_bag_with_env(
+        {"BIGDATA_INGESTION_SOURCES": "open_meteo, outra_fonte", "BIGDATA_DBT_SOURCES": "open_meteo"}
+    )
+    return bag.get_dag("weather_pipeline")
 
 
 def test_no_import_errors(dag_bag):
@@ -119,3 +132,48 @@ def test_malformed_platform_line_is_rejected(tmp_path):
 
     with pytest.raises(ValueError, match="local.env:3"):
         config.load_platform_env(str(file))
+
+
+ALERTED_DAGS = ("weather_pipeline", "bronze_freshness")
+
+
+def all_tasks(bag):
+    return [task for dag_id in ALERTED_DAGS for task in bag.get_dag(dag_id).tasks]
+
+
+def test_local_environment_sends_no_email(dag_bag):
+    assert config.ALERT_EMAILS == ()
+    for task in all_tasks(dag_bag):
+        assert not task.on_failure_callback, task.task_id
+
+
+def test_every_task_emails_on_failure_outside_local(dag_bag_with_env):
+    bag = dag_bag_with_env({"BIGDATA_ALERT_EMAILS": "andredimov@hotmail.com"})
+
+    for task in all_tasks(bag):
+        [notifier] = task.on_failure_callback
+        assert type(notifier).__name__ == "SmtpNotifier", task.task_id
+        assert notifier.to == ["andredimov@hotmail.com"]
+        assert task.retries == 2
+
+
+def test_alert_email_default_is_andre(dag_bag_with_env):
+    dag_bag_with_env(unset_env=("BIGDATA_ALERT_EMAILS",))
+
+    assert config.ALERT_EMAILS == ("andredimov@hotmail.com",)
+
+
+def test_invalid_alert_email_is_rejected():
+    with pytest.raises(ValueError, match="sem-arroba"):
+        config.parse_emails("andredimov@hotmail.com, sem-arroba")
+
+
+def test_freshness_runs_daily_outside_the_pipeline(dag_bag):
+    dag = dag_bag.get_dag("bronze_freshness")
+    task = dag.get_task("dbt_source_freshness")
+
+    assert dag.max_active_runs == 1
+    assert dag.catchup is False
+    assert task.command == ["source", "freshness"]
+    assert task.network_mode == "bigdata"
+    assert task.environment["DBT_TARGET"] == "local"

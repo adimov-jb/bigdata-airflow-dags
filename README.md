@@ -1,6 +1,6 @@
 # Airflow — orquestração do pipeline
 
-Airflow 3.3 (LocalExecutor) em Docker, com a DAG `weather_pipeline`, que liga os outros repositórios:
+Airflow 3.3 (LocalExecutor) em Docker, com duas DAGs: `weather_pipeline`, que liga os outros repositórios, e `bronze_freshness`, que monitora se os dados continuam chegando (veja [Alertas e monitoramento](#alertas-e-monitoramento)).
 
 ```
 ingest_open_meteo ──> register_open_meteo ──> dbt_build ──> validate_gold
@@ -21,7 +21,7 @@ Cada fonte tem uma cadeia própria. O `dbt_build` só depende das fontes que o d
 - **Agenda:** todo dia às 03:00 UTC. O run de D processa **D-1**, que a essa hora já está completo na API.
 - **Idempotente:** reexecutar um run ou fazer backfill não duplica dados (a partição é sobrescrita e o dbt faz merge).
 - **Um run por vez** (`max_active_runs=1`), porque commits Iceberg simultâneos na mesma tabela conflitam.
-- **Tentativas:** 2 novas tentativas por task, com 2 minutos de intervalo.
+- **Tentativas:** 2 novas tentativas por task, com 2 minutos de intervalo. Se todas falharem, sai um alerta por e-mail (desligado no ambiente local).
 - **Fontes independentes:** cada fonte de `BIGDATA_INGESTION_SOURCES` (`.env.local`) roda sua cadeia `ingest_<fonte>` → `register_<fonte>` em paralelo, com retry e log próprios. Uma fonte não espera nenhuma outra.
 - **dbt só espera o que lê:** o `dbt_build` depende apenas das fontes de `BIGDATA_DBT_SOURCES`. Se uma fonte fora dessa lista falhar, o run fica marcado como falho, mas a gold é atualizada normalmente.
 - **Containers:** as tasks de ingestão e dbt executam as **imagens dos outros repositórios** com `DockerOperator`. O Airflow não instala nem o dbt nem o código de ingestão.
@@ -42,10 +42,11 @@ docker compose up -d --build
 ```
 
 - UI: **http://localhost:8080**, usuário `airflow`, senha `airflow`.
-- A DAG nasce **pausada**. Ative-a na UI ou com:
+- As DAGs nascem **pausadas**. Ative-as na UI ou com:
 
 ```bash
 docker compose exec airflow-scheduler airflow dags unpause weather_pipeline
+docker compose exec airflow-scheduler airflow dags unpause bronze_freshness
 ```
 
 Ao ativar, o Airflow cria o run do dia mais recente (`catchup=False`).
@@ -79,11 +80,24 @@ Os logs de cada task ficam na UI e em `logs/`. Os containers das tasks são remo
 docker compose run --rm --build tests
 ```
 
-Verificam que a DAG importa sem erros, a ordem das tasks, a cadeia de cada fonte, que o dbt só espera as fontes que lê, `max_active_runs`/`catchup`, a rede dos containers e que todas as etapas usam D-1.
+Verificam que as DAGs importam sem erros, a cadeia de cada fonte, que o dbt só espera as fontes que lê, `max_active_runs`/`catchup`, a rede dos containers, que todas as etapas usam D-1, o contrato da plataforma e os alertas: nenhum e-mail no ambiente local, e e-mail em todas as tasks fora dele.
 
 ## CI
 
 O workflow [`.github/workflows/ci.yml`](.github/workflows/ci.yml) roda em todo PR e em todo push para a `main`, com o mesmo comando de testes acima.
+
+## Alertas e monitoramento
+
+**E-mail de falha.** Toda task das duas DAGs envia e-mail quando falha de vez, depois das novas tentativas. O assunto informa DAG, task e data, e o corpo traz o run, o erro e o link para o log. O envio usa o `SmtpNotifier` do provider SMTP (`dags/bigdata_pipeline/alerts.py`).
+
+| | Ambiente local | Fora do local (AWS) |
+|---|---|---|
+| `BIGDATA_ALERT_EMAILS` | vazio no `.env.local`: nenhum e-mail é enviado | não definir: o padrão é `andredimov@hotmail.com`. Vários destinatários são separados por vírgula |
+| Conexão `smtp_default` | não usada | obrigatória, com host, porta, usuário, senha e `from_email`, por exemplo `AIRFLOW_CONN_SMTP_DEFAULT='smtp://usuario:senha@smtp.exemplo.com:587?from_email=airflow%40exemplo.com'`. Guarde-a no Secrets Manager |
+
+Sem a conexão SMTP, a falha da task continua aparecendo na UI, mas o e-mail não sai, e o erro do envio fica no log da task.
+
+**Freshness da bronze.** A DAG `bronze_freshness` roda `dbt source freshness` todo dia às 12:00 UTC. O aviso sai com 1 dia sem dados novos, e o erro, que dispara o e-mail, com 2 dias. Os limites ficam nas sources do repositório dbt. A DAG fica separada do `weather_pipeline` para pegar justamente os casos em que ele deixou de rodar: DAG pausada ou falhas seguidas.
 
 ## Como o Airflow executa containers
 
@@ -93,8 +107,11 @@ As tasks precisam criar containers no Docker do host. Em vez de montar o `docker
 
 ```
 dags/
-  weather_pipeline.py        a DAG
-  bigdata_pipeline/config.py imagens, rede, fontes de ingestão e contrato da plataforma repassado aos containers
+  weather_pipeline.py        pipeline diário: ingestão → catálogo → dbt → validação
+  bronze_freshness.py        freshness diária da bronze (dbt source freshness)
+  bigdata_pipeline/config.py imagens, rede, fontes, contrato da plataforma e destinatários dos alertas
+  bigdata_pipeline/tasks.py  argumentos padrão das DAGs (tentativas e alerta) e tasks de container
+  bigdata_pipeline/alerts.py e-mail de falha (SmtpNotifier)
   .airflowignore             evita que o Airflow procure DAGs em bigdata_pipeline/
 tests/                       testes de integridade da DAG (fixtures/platform.env imita o contrato da plataforma)
 docker-compose.yml           Postgres, docker-proxy, api-server, scheduler e dag-processor

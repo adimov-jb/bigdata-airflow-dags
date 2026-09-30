@@ -13,31 +13,17 @@
   reexecutar um run ou fazer backfill não duplica dados.
 - **Backfill:** pela UI (*Trigger* → *Backfill*) ou `airflow backfill create`.
   `max_active_runs=1` porque commits Iceberg simultâneos na mesma tabela conflitam.
+- **Alerta:** a task que falhar depois das novas tentativas envia e-mail para
+  `BIGDATA_ALERT_EMAILS` (desligado no ambiente local).
 """
-
-from datetime import timedelta
 
 import pendulum
 from airflow.providers.common.sql.operators.sql import SQLCheckOperator
-from airflow.providers.docker.operators.docker import DockerOperator
 from airflow.sdk import DAG
 from bigdata_pipeline import config
+from bigdata_pipeline.tasks import container_task, default_args
 
 TARGET_DATE = "{{ macros.ds_add(ds, -1) }}"
-
-
-def container_task(task_id: str, image: str, command: list[str], environment: dict) -> DockerOperator:
-    return DockerOperator(
-        task_id=task_id,
-        image=image,
-        command=command,
-        environment=environment,
-        docker_url=config.DOCKER_URL,
-        network_mode=config.DOCKER_NETWORK,
-        auto_remove="force",
-        # Sem bind de /tmp do host: não funciona com o socket via proxy/Docker Desktop.
-        mount_tmp_dir=False,
-    )
 
 
 with DAG(
@@ -46,7 +32,7 @@ with DAG(
     start_date=pendulum.datetime(2026, 9, 1, tz="UTC"),
     catchup=False,
     max_active_runs=1,
-    default_args={"retries": 2, "retry_delay": timedelta(minutes=2)},
+    default_args=default_args(),
     tags=["bigdata", "open-meteo"],
     doc_md=__doc__,
 ) as dag:
