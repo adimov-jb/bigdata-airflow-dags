@@ -50,8 +50,10 @@ Ao ativar, o Airflow cria o run do dia mais recente (`catchup=False`).
 # Processar um dia específico: a data lógica D processa o dia D-1
 docker compose exec airflow-scheduler airflow dags trigger weather_pipeline --logical-date 2026-09-25T03:00:00+00:00
 
-# Backfill de um período (também dá pela UI: Trigger → Backfill)
-docker compose exec airflow-scheduler airflow backfill create --dag-id weather_pipeline --from-date 2026-09-01 --to-date 2026-09-10
+# Backfill (também dá pela UI: Trigger → Backfill). Cria um run para cada 03:00 UTC
+# dentro do intervalo, e cada run processa o dia anterior. Exemplo: processa os dias 01 a 09/09.
+# Datas sem horário valem 00:00, então use 23:00 no fim para incluir o run das 03:00 do último dia.
+docker compose exec airflow-scheduler airflow backfill create --dag-id weather_pipeline --from-date 2026-09-02 --to-date 2026-09-10T23:00:00
 
 # Reexecutar uma task e as seguintes: na UI, abra o run → task → "Clear" (com "Downstream")
 ```
