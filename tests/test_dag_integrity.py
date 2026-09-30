@@ -38,7 +38,7 @@ def multi_source_dag(dag_bag_with_env):
     bag = dag_bag_with_env(
         {"BIGDATA_INGESTION_SOURCES": "open_meteo, open_meteo_locations, outra_fonte"}
     )
-    return bag.get_dag("weather_pipeline")
+    return bag.get_dag("bigdata_daily")
 
 
 @pytest.fixture
@@ -51,15 +51,15 @@ def multi_domain_dag(monkeypatch):
     )
     bag = DagBag(dag_folder=DAGS_FOLDER)
     assert bag.import_errors == {}
-    return bag.get_dag("weather_pipeline")
+    return bag.get_dag("bigdata_daily")
 
 
 def test_no_import_errors(dag_bag):
     assert dag_bag.import_errors == {}
 
 
-def test_weather_pipeline_dependencies(dag_bag):
-    dag = dag_bag.get_dag("weather_pipeline")
+def test_bigdata_daily_dependencies(dag_bag):
+    dag = dag_bag.get_dag("bigdata_daily")
 
     for source in ("open_meteo", "open_meteo_locations"):
         assert dag.get_task(f"ingest_{source}").downstream_task_ids == {f"register_{source}"}
@@ -71,15 +71,15 @@ def test_weather_pipeline_dependencies(dag_bag):
     assert "validate_gold" not in dag.task_ids
 
 
-def test_weather_pipeline_runs_one_at_a_time(dag_bag):
-    dag = dag_bag.get_dag("weather_pipeline")
+def test_bigdata_daily_runs_one_at_a_time(dag_bag):
+    dag = dag_bag.get_dag("bigdata_daily")
 
     assert dag.max_active_runs == 1
     assert dag.catchup is False
 
 
 def test_containers_run_on_platform_network(dag_bag):
-    dag = dag_bag.get_dag("weather_pipeline")
+    dag = dag_bag.get_dag("bigdata_daily")
 
     for task_id in ("ingest_open_meteo", "register_open_meteo", "dbt_build_open_meteo"):
         task = dag.get_task(task_id)
@@ -88,7 +88,7 @@ def test_containers_run_on_platform_network(dag_bag):
 
 
 def test_every_step_processes_the_previous_day(dag_bag):
-    dag = dag_bag.get_dag("weather_pipeline")
+    dag = dag_bag.get_dag("bigdata_daily")
 
     assert "macros.ds_add(ds, -1)" in " ".join(dag.get_task("ingest_open_meteo").command)
     assert "macros.ds_add(ds, -1)" in " ".join(dag.get_task("dbt_build_open_meteo").command)
@@ -114,7 +114,7 @@ def test_dbt_waits_only_for_the_sources_it_reads(multi_source_dag):
 
 
 def test_dbt_build_selects_only_its_domain(dag_bag):
-    task = dag_bag.get_dag("weather_pipeline").get_task("dbt_build_open_meteo")
+    task = dag_bag.get_dag("bigdata_daily").get_task("dbt_build_open_meteo")
 
     assert task.command[:3] == ["build", "--select", "@source:open_meteo"]
 
@@ -141,7 +141,7 @@ def test_dbt_domain_without_ingestion_is_rejected():
 
 
 def test_containers_receive_the_platform_contract(dag_bag):
-    dag = dag_bag.get_dag("weather_pipeline")
+    dag = dag_bag.get_dag("bigdata_daily")
     platform = config.load_platform_env("/opt/airflow/tests/fixtures/platform.env")
 
     assert dag.get_task("ingest_open_meteo").environment == platform
@@ -163,7 +163,7 @@ def test_malformed_platform_line_is_rejected(tmp_path):
         config.load_platform_env(str(file))
 
 
-ALERTED_DAGS = ("weather_pipeline", "bronze_freshness")
+ALERTED_DAGS = ("bigdata_daily", "bronze_freshness")
 
 
 def all_tasks(bag):

@@ -1,6 +1,6 @@
 # Airflow — orquestração do pipeline
 
-Airflow 3.3 (LocalExecutor) em Docker, com duas DAGs: `weather_pipeline`, que liga os outros repositórios, e `bronze_freshness`, que monitora se os dados continuam chegando (veja [Alertas e monitoramento](#alertas-e-monitoramento)).
+Airflow 3.3 (LocalExecutor) em Docker, com duas DAGs: `bigdata_daily`, que liga os outros repositórios, e `bronze_freshness`, que monitora se os dados continuam chegando (veja [Alertas e monitoramento](#alertas-e-monitoramento)).
 
 ```
 ingest_open_meteo           ──> register_open_meteo           ──┐
@@ -28,12 +28,14 @@ Cada fonte tem uma cadeia própria. Cada domínio do dbt tem seu próprio build,
 
 ## Pré-requisitos
 
+O `scripts/platform.sh up`, do repositório `bigdata-terraform`, cumpre todos os pré-requisitos abaixo e sobe o Airflow. Problemas comuns e como resolvê-los estão no [RUNBOOK](https://github.com/adimov-jb/bigdata-terraform/blob/main/RUNBOOK.md).
+
 1. Plataforma no ar: `docker compose up -d` e `terraform apply` no repositório `bigdata-terraform`. O `apply` gera `platform/local.env`, que o Airflow monta em `/opt/airflow/platform` e repassa aos containers das tasks (buckets, LocalStack e Trino). Sem esse arquivo, a DAG não carrega, e a UI mostra o erro com a instrução para corrigir. Se o repositório do Terraform não estiver em `../Terraform`, defina `BIGDATA_PLATFORM_DIR`.
 2. Imagens construídas:
    - `docker compose build` em `ingestion-python`, que gera `bigdata-ingestion:local`.
    - `docker compose build` em `dbt-modeling`, que gera `bigdata-dbt:local`.
 
-   Depois de mudar código nesses repositórios, **reconstrua a imagem**: o Airflow usa o que está na imagem.
+   Depois de mudar código nesses repositórios, **reconstrua a imagem**, porque o Airflow usa o que está na imagem. `scripts/platform.sh status` avisa quando uma imagem está desatualizada, e a primeira linha do log de cada task mostra o commit da imagem que rodou.
 
 ## Subir
 
@@ -45,22 +47,24 @@ docker compose up -d --build
 - As DAGs nascem **pausadas**. Ative-as na UI ou com:
 
 ```bash
-docker compose exec airflow-scheduler airflow dags unpause weather_pipeline
+docker compose exec airflow-scheduler airflow dags unpause bigdata_daily
 docker compose exec airflow-scheduler airflow dags unpause bronze_freshness
 ```
 
 Ao ativar, o Airflow cria o run do dia mais recente (`catchup=False`).
 
+A DAG `bigdata_daily` se chamava `weather_pipeline` até ganhar outras fontes além do tempo. Os runs antigos continuam na UI com o nome anterior, como DAG inativa.
+
 ## Operação
 
 ```bash
 # Processar um dia específico: a data lógica D processa o dia D-1
-docker compose exec airflow-scheduler airflow dags trigger weather_pipeline --logical-date 2026-09-25T03:00:00+00:00
+docker compose exec airflow-scheduler airflow dags trigger bigdata_daily --logical-date 2026-09-25T03:00:00+00:00
 
 # Backfill (também dá pela UI: Trigger → Backfill). Cria um run para cada 03:00 UTC
 # dentro do intervalo, e cada run processa o dia anterior. Exemplo: processa os dias 01 a 09/09.
 # Datas sem horário valem 00:00, então use 23:00 no fim para incluir o run das 03:00 do último dia.
-docker compose exec airflow-scheduler airflow backfill create --dag-id weather_pipeline --from-date 2026-09-02 --to-date 2026-09-10T23:00:00
+docker compose exec airflow-scheduler airflow backfill create --dag-id bigdata_daily --from-date 2026-09-02 --to-date 2026-09-10T23:00:00
 
 # Reexecutar uma task e as seguintes: na UI, abra o run → task → "Clear" (com "Downstream")
 ```
@@ -97,7 +101,7 @@ O workflow [`.github/workflows/ci.yml`](.github/workflows/ci.yml) roda em todo P
 
 Sem a conexão SMTP, a falha da task continua aparecendo na UI, mas o e-mail não sai, e o erro do envio fica no log da task.
 
-**Freshness da bronze.** A DAG `bronze_freshness` roda `dbt source freshness` todo dia às 12:00 UTC. O aviso sai com 1 dia sem dados novos, e o erro, que dispara o e-mail, com 2 dias. Os limites ficam nas sources do repositório dbt. A DAG fica separada do `weather_pipeline` para pegar justamente os casos em que ele deixou de rodar: DAG pausada ou falhas seguidas.
+**Freshness da bronze.** A DAG `bronze_freshness` roda `dbt source freshness` todo dia às 12:00 UTC. O aviso sai com 1 dia sem dados novos, e o erro, que dispara o e-mail, com 2 dias. Os limites ficam nas sources do repositório dbt. A DAG fica separada do `bigdata_daily` para pegar justamente os casos em que ele deixou de rodar: DAG pausada ou falhas seguidas.
 
 ## Como o Airflow executa containers
 
@@ -107,7 +111,7 @@ As tasks precisam criar containers no Docker do host. Em vez de montar o `docker
 
 ```
 dags/
-  weather_pipeline.py        pipeline diário: ingestão → catálogo → dbt build por domínio (com os testes da gold)
+  bigdata_daily.py           pipeline diário: ingestão → catálogo → dbt build por domínio (com os testes da gold)
   bronze_freshness.py        freshness diária da bronze (dbt source freshness)
   bigdata_pipeline/config.py imagens, rede, fontes, contrato da plataforma e destinatários dos alertas
   bigdata_pipeline/tasks.py  argumentos padrão das DAGs (tentativas e alerta) e tasks de container
@@ -116,6 +120,7 @@ dags/
 tests/                       testes de integridade da DAG (fixtures/platform.env imita o contrato da plataforma)
 docker-compose.yml           Postgres, docker-proxy, api-server, scheduler e dag-processor
 .env.local                   configuração local (valores de desenvolvimento, sem segredos reais)
+Dockerfile                   Airflow e providers fixados pelas constraints oficiais da versão (AIRFLOW_VERSION)
 ```
 
 ## Na AWS

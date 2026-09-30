@@ -1,5 +1,7 @@
 """
-### Pipeline diário do tempo (Open-Meteo)
+### Pipeline diário da plataforma
+
+Orquestra todas as fontes de ingestão e os domínios do dbt (hoje: Open-Meteo).
 
 `ingest_<fonte>` → `register_<fonte>` (uma cadeia por fonte) → `dbt_build_<domínio>`
 
@@ -30,13 +32,13 @@ TARGET_DATE = "{{ macros.ds_add(ds, -1) }}"
 
 
 with DAG(
-    dag_id="weather_pipeline",
+    dag_id="bigdata_daily",
     schedule="0 3 * * *",
     start_date=pendulum.datetime(2026, 9, 1, tz="UTC"),
     catchup=False,
     max_active_runs=1,
     default_args=default_args(),
-    tags=["bigdata", "open-meteo"],
+    tags=["bigdata", "pipeline"],
     doc_md=__doc__,
 ) as dag:
     registered = {}
