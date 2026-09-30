@@ -28,7 +28,7 @@ Cada fonte tem uma cadeia própria. O `dbt_build` só depende das fontes que o d
 
 ## Pré-requisitos
 
-1. Plataforma no ar: `docker compose up -d` e `terraform apply` no repositório `bigdata-terraform`.
+1. Plataforma no ar: `docker compose up -d` e `terraform apply` no repositório `bigdata-terraform`. O `apply` gera `platform/local.env`, que o Airflow monta em `/opt/airflow/platform` e repassa aos containers das tasks (buckets, LocalStack e Trino). Sem esse arquivo, a DAG não carrega, e a UI mostra o erro com a instrução para corrigir. Se o repositório do Terraform não estiver em `../Terraform`, defina `BIGDATA_PLATFORM_DIR`.
 2. Imagens construídas:
    - `docker compose build` em `ingestion-python`, que gera `bigdata-ingestion:local`.
    - `docker compose build` em `dbt-modeling`, que gera `bigdata-dbt:local`.
@@ -94,9 +94,9 @@ As tasks precisam criar containers no Docker do host. Em vez de montar o `docker
 ```
 dags/
   weather_pipeline.py        a DAG
-  bigdata_pipeline/config.py imagens, rede, fontes de ingestão e variáveis repassadas aos containers
+  bigdata_pipeline/config.py imagens, rede, fontes de ingestão e contrato da plataforma repassado aos containers
   .airflowignore             evita que o Airflow procure DAGs em bigdata_pipeline/
-tests/                       testes de integridade da DAG
+tests/                       testes de integridade da DAG (fixtures/platform.env imita o contrato da plataforma)
 docker-compose.yml           Postgres, docker-proxy, api-server, scheduler e dag-processor
 .env.local                   configuração local (valores de desenvolvimento, sem segredos reais)
 ```

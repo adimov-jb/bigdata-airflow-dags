@@ -32,15 +32,16 @@ def test_no_import_errors(dag_bag):
     assert dag_bag.import_errors == {}
 
 
-def test_weather_pipeline_order(dag_bag):
+def test_weather_pipeline_dependencies(dag_bag):
     dag = dag_bag.get_dag("weather_pipeline")
 
-    assert [task.task_id for task in dag.topological_sort()] == [
-        "ingest_open_meteo",
+    for source in ("open_meteo", "open_meteo_locations"):
+        assert dag.get_task(f"ingest_{source}").downstream_task_ids == {f"register_{source}"}
+    assert dag.get_task("dbt_build").upstream_task_ids == {
         "register_open_meteo",
-        "dbt_build",
-        "validate_gold",
-    ]
+        "register_open_meteo_locations",
+    }
+    assert dag.get_task("validate_gold").upstream_task_ids == {"dbt_build"}
 
 
 def test_weather_pipeline_runs_one_at_a_time(dag_bag):
@@ -95,3 +96,26 @@ def test_invalid_source_list_is_rejected(value):
 def test_dbt_source_without_ingestion_is_rejected():
     with pytest.raises(ValueError, match="sem_ingestao"):
         config.dbt_sources(("open_meteo",), "open_meteo,sem_ingestao")
+
+
+def test_containers_receive_the_platform_contract(dag_bag):
+    dag = dag_bag.get_dag("weather_pipeline")
+    platform = config.load_platform_env("/opt/airflow/tests/fixtures/platform.env")
+
+    assert dag.get_task("ingest_open_meteo").environment == platform
+    dbt_env = dag.get_task("dbt_build").environment
+    assert dbt_env["SILVER_BUCKET"] == "bigdata-local-silver"
+    assert dbt_env["DBT_TARGET"] == "local"
+
+
+def test_missing_platform_file_explains_how_to_fix(tmp_path):
+    with pytest.raises(FileNotFoundError, match="terraform apply"):
+        config.load_platform_env(str(tmp_path / "local.env"))
+
+
+def test_malformed_platform_line_is_rejected(tmp_path):
+    file = tmp_path / "local.env"
+    file.write_text("# comentário\nBRONZE_BUCKET=x\nsem-igual\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="local.env:3"):
+        config.load_platform_env(str(file))

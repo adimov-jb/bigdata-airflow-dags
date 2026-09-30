@@ -1,15 +1,18 @@
 """Configuração do pipeline local.
 
 Os valores vêm do ambiente do Airflow (.env.local); os padrões são os do ambiente local.
-As variáveis repassadas aos containers espelham os .env.local dos repositórios de ingestão e dbt.
+Buckets, LocalStack e Trino vêm do contrato da plataforma (platform/local.env, gerado pelo
+terraform apply do repositório Terraform) e são repassados aos containers das tasks.
 """
 
 import os
+from pathlib import Path
 
 DOCKER_URL = os.getenv("BIGDATA_DOCKER_URL", "tcp://docker-proxy:2375")
 DOCKER_NETWORK = os.getenv("BIGDATA_DOCKER_NETWORK", "bigdata")
 INGESTION_IMAGE = os.getenv("BIGDATA_INGESTION_IMAGE", "bigdata-ingestion:local")
 DBT_IMAGE = os.getenv("BIGDATA_DBT_IMAGE", "bigdata-dbt:local")
+PLATFORM_ENV_FILE = os.getenv("BIGDATA_PLATFORM_ENV_FILE", "/opt/airflow/platform/local.env")
 
 
 def parse_sources(variable: str, value: str) -> tuple[str, ...]:
@@ -29,32 +32,45 @@ def dbt_sources(ingestion_sources: tuple[str, ...], value: str) -> tuple[str, ..
     return sources
 
 
+def load_platform_env(path: str) -> dict[str, str]:
+    """Lê o arquivo KEY=VALUE gerado pelo Terraform. Falha com instrução se não existir."""
+    file = Path(path)
+    if not file.is_file():
+        raise FileNotFoundError(
+            f"{path} não encontrado. Rode `terraform apply` no repositório Terraform, que gera "
+            "platform/local.env, e confira o volume da pasta platform no docker-compose.yml."
+        )
+    env = {}
+    for number, line in enumerate(file.read_text(encoding="utf-8").splitlines(), start=1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, separator, value = line.partition("=")
+        if not separator or not key.strip():
+            raise ValueError(f"{path}:{number}: linha inválida, esperado KEY=VALUE")
+        env[key.strip()] = value.strip()
+    return env
+
+
 # Fontes da imagem de ingestão (`ingestion list`). Cada uma vira a cadeia independente
 # ingest_<fonte> → register_<fonte>.
 INGESTION_SOURCES = parse_sources(
-    "BIGDATA_INGESTION_SOURCES", os.getenv("BIGDATA_INGESTION_SOURCES", "open_meteo")
+    "BIGDATA_INGESTION_SOURCES",
+    os.getenv("BIGDATA_INGESTION_SOURCES", "open_meteo,open_meteo_locations"),
 )
-# Fontes lidas pelo dbt (sources do projeto dbt); só elas bloqueiam o dbt_build.
-DBT_SOURCES = dbt_sources(INGESTION_SOURCES, os.getenv("BIGDATA_DBT_SOURCES", "open_meteo"))
+# Fontes de ingestão lidas pelo dbt; só elas bloqueiam o dbt_build.
+DBT_SOURCES = dbt_sources(
+    INGESTION_SOURCES, os.getenv("BIGDATA_DBT_SOURCES", "open_meteo,open_meteo_locations")
+)
 
-_TRINO = {"TRINO_HOST": "trino", "TRINO_PORT": "8080"}
+PLATFORM_ENV = load_platform_env(PLATFORM_ENV_FILE)
 
-INGESTION_ENV = {
-    # Credenciais fictícias do LocalStack.
-    "AWS_ACCESS_KEY_ID": "test",
-    "AWS_SECRET_ACCESS_KEY": "test",
-    "AWS_DEFAULT_REGION": "us-east-1",
-    "AWS_ENDPOINT_URL": "http://localstack:4566",
-    "BRONZE_BUCKET": "bigdata-local-bronze",
-    **_TRINO,
-}
+INGESTION_ENV = dict(PLATFORM_ENV)
 
 DBT_ENV = {
+    **PLATFORM_ENV,
     "DBT_TARGET": "local",
-    "SILVER_BUCKET": "bigdata-local-silver",
-    "GOLD_BUCKET": "bigdata-local-gold",
     # Log legível na UI do Airflow (sem códigos de cor) e sem telemetria do dbt.
     "DBT_USE_COLORS": "false",
     "DBT_SEND_ANONYMOUS_USAGE_STATS": "false",
-    **_TRINO,
 }
