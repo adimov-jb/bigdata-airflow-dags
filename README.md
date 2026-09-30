@@ -15,14 +15,14 @@ Cada fonte tem uma cadeia própria. Cada domínio do dbt tem seu próprio build,
 |---|---|---|
 | `ingest_<fonte>` | `ingestion run <fonte> --date D-1`: fonte → Parquet na bronze (uma task por fonte) | `EcsRunTaskOperator` |
 | `register_<fonte>` | `ingestion register-local <fonte>`: tabela e partições no Hive Metastore | `GlueCrawlerOperator` |
-| `dbt_build_<domínio>` | `dbt build --select @source:<domínio> --vars '{"start_date": "D-1"}'`: silver e gold (Iceberg) do domínio, com testes. Um dos testes (`assert_gold_days_complete`) falha se o dia não chegou à gold ou se falta alguma hora em alguma cidade | `EcsRunTaskOperator` |
+| `dbt_build_<domínio>` | `dbt build --selector <domínio> --vars '{"start_date": "D-1"}'`: silver e gold (Iceberg) do domínio, com testes. Os domínios são os seletores do `selectors.yml` do projeto dbt. Um dos testes (`assert_gold_days_complete`) falha se o dia não chegou à gold ou se falta alguma hora em alguma cidade | `EcsRunTaskOperator` |
 
 - **Agenda:** todo dia às 03:00 UTC. O run de D processa **D-1**, que a essa hora já está completo na API.
 - **Idempotente:** reexecutar um run ou fazer backfill não duplica dados (a partição é sobrescrita e o dbt faz merge).
 - **Um run por vez** (`max_active_runs=1`), porque commits Iceberg simultâneos na mesma tabela conflitam.
 - **Tentativas:** 2 novas tentativas por task, com 2 minutos de intervalo. Se todas falharem, sai um alerta por e-mail (desligado no ambiente local).
 - **Fontes independentes:** cada fonte de `BIGDATA_INGESTION_SOURCES` (`.env.local`) roda sua cadeia `ingest_<fonte>` → `register_<fonte>` em paralelo, com retry e log próprios. Uma fonte não espera nenhuma outra.
-- **Um dbt build por domínio:** `DBT_DOMAINS`, em `dags/bigdata_pipeline/config.py`, liga cada domínio do dbt (o nome da source no projeto dbt) às fontes de ingestão que ele lê. Cada domínio tem sua task `dbt_build_<domínio>`, que espera só essas fontes. Se outra fonte ou outro domínio falhar, o run fica marcado como falho, mas a gold desse domínio é atualizada normalmente.
+- **Um dbt build por domínio:** `DBT_DOMAINS`, em `dags/bigdata_pipeline/config.py`, liga cada domínio do dbt (um seletor do `selectors.yml` do projeto dbt) às fontes de ingestão que ele lê. Hoje são dois: `open_meteo` (tempo) e `countries` (Rest Countries e Banco Mundial). Cada domínio tem sua task `dbt_build_<domínio>`, que espera só essas fontes. Se outra fonte ou outro domínio falhar, o run fica marcado como falho, mas a gold desse domínio é atualizada normalmente.
 - **Validação da gold no dbt:** a checagem de dia completo é um teste do dbt, e não uma task do Airflow. Por isso ela roda igual no Trino e no Athena.
 - **Containers:** as tasks de ingestão e dbt executam as **imagens dos outros repositórios** com `DockerOperator`. O Airflow não instala nem o dbt nem o código de ingestão.
 
@@ -89,6 +89,10 @@ Verificam que as DAGs importam sem erros, a cadeia de cada fonte, que cada domí
 ## CI
 
 O workflow [`.github/workflows/ci.yml`](.github/workflows/ci.yml) roda em todo PR e em todo push para a `main`, com o mesmo comando de testes acima.
+
+## Chaves de API
+
+As chaves ficam em `platform/secrets.env`, no repositório `bigdata-terraform`, fora do git. O modelo está em `platform/secrets.env.example`. `SOURCE_SECRET_NAMES` (`config.py`) diz qual chave vai para qual fonte. Cada task `ingest_<fonte>` recebe só as suas chaves, pelo `private_environment` do `DockerOperator`, que não aparece na UI nem nos logs. Se o arquivo ou a chave faltar, a DAG carrega normalmente e só a task daquela fonte falha, com a mensagem de onde preencher a chave.
 
 ## Alertas e monitoramento
 

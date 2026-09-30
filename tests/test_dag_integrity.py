@@ -36,7 +36,7 @@ def dag_bag_with_env(monkeypatch):
 def multi_source_dag(dag_bag_with_env):
     """A DAG com uma fonte a mais, que nenhum domínio do dbt lê."""
     bag = dag_bag_with_env(
-        {"BIGDATA_INGESTION_SOURCES": "open_meteo, open_meteo_locations, outra_fonte"}
+        {"BIGDATA_INGESTION_SOURCES": config.DEFAULT_SOURCES + ", outra_fonte"}
     )
     return bag.get_dag("bigdata_daily")
 
@@ -68,6 +68,11 @@ def test_bigdata_daily_dependencies(dag_bag):
         "register_open_meteo_locations",
     }
     assert dag.get_task("dbt_build_open_meteo").downstream_task_ids == set()
+    assert dag.get_task("dbt_build_countries").upstream_task_ids == {
+        "register_rest_countries",
+        "register_world_bank_indicators",
+        "register_world_bank_countries",
+    }
     assert "validate_gold" not in dag.task_ids
 
 
@@ -116,14 +121,14 @@ def test_dbt_waits_only_for_the_sources_it_reads(multi_source_dag):
 def test_dbt_build_selects_only_its_domain(dag_bag):
     task = dag_bag.get_dag("bigdata_daily").get_task("dbt_build_open_meteo")
 
-    assert task.command[:3] == ["build", "--select", "@source:open_meteo"]
+    assert task.command[:3] == ["build", "--selector", "open_meteo"]
 
 
 def test_each_dbt_domain_is_independent(multi_domain_dag):
     dag = multi_domain_dag
 
     assert dag.get_task("dbt_build_outro").upstream_task_ids == {"register_open_meteo_locations"}
-    assert dag.get_task("dbt_build_outro").command[2] == "@source:outro"
+    assert dag.get_task("dbt_build_outro").command[2] == "outro"
     # Nenhum build de domínio depende de outro.
     assert not dag.get_task("dbt_build_open_meteo").upstream_task_ids & {"dbt_build_outro"}
     assert not dag.get_task("dbt_build_outro").upstream_task_ids & {"dbt_build_open_meteo"}
@@ -206,3 +211,22 @@ def test_freshness_runs_daily_outside_the_pipeline(dag_bag):
     assert task.command == ["source", "freshness"]
     assert task.network_mode == "bigdata"
     assert task.environment["DBT_TARGET"] == "local"
+
+
+def test_api_key_reaches_only_its_source(dag_bag_with_env, tmp_path):
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text("REST_COUNTRIES_API_KEY=chave-de-teste\n", encoding="utf-8")
+    bag = dag_bag_with_env({"BIGDATA_SECRETS_ENV_FILE": str(secrets)})
+    dag = bag.get_dag("bigdata_daily")
+
+    rest_countries = dag.get_task("ingest_rest_countries")
+    assert rest_countries._private_environment == {"REST_COUNTRIES_API_KEY": "chave-de-teste"}
+    assert "REST_COUNTRIES_API_KEY" not in rest_countries.environment
+    for task_id in ("ingest_world_bank_indicators", "register_rest_countries", "dbt_build_countries"):
+        assert dag.get_task(task_id)._private_environment == {}, task_id
+
+
+def test_missing_secrets_file_does_not_break_the_dag(dag_bag_with_env, tmp_path):
+    bag = dag_bag_with_env({"BIGDATA_SECRETS_ENV_FILE": str(tmp_path / "nao-existe.env")})
+
+    assert bag.get_dag("bigdata_daily").get_task("ingest_rest_countries")._private_environment == {}
