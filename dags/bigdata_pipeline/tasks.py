@@ -15,12 +15,20 @@ def default_args() -> dict:
     }
 
 
-def container_task(task_id: str, image: str, command: list[str], environment: dict) -> DockerOperator:
+def container_task(
+    task_id: str,
+    image: str,
+    command: list[str],
+    environment: dict,
+    private_environment: dict | None = None,
+) -> DockerOperator:
     return DockerOperator(
         task_id=task_id,
         image=image,
         command=command,
         environment=environment,
+        # Segredos (chaves de API): não aparecem na UI nem no log da task.
+        private_environment=private_environment or {},
         docker_url=config.DOCKER_URL,
         network_mode=config.DOCKER_NETWORK,
         auto_remove="force",

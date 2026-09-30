@@ -8,7 +8,7 @@ Orquestra todas as fontes de ingestão e os domínios do dbt (hoje: Open-Meteo).
 - **Fontes independentes:** cada fonte de `BIGDATA_INGESTION_SOURCES` tem sua própria cadeia
   `ingest_<fonte>` → `register_<fonte>`, em paralelo, com retry e log próprios.
 - **Um dbt build por domínio:** cada domínio de `DBT_DOMAINS` (config.py) tem sua task
-  `dbt_build_<domínio>`, que roda `dbt build --select @source:<domínio>` e espera só as fontes
+  `dbt_build_<domínio>`, que roda `dbt build --selector <domínio>` e espera só as fontes
   desse domínio. A falha de outra fonte ou de outro domínio marca o run como falho, mas não
   bloqueia essa gold.
 - **Validação da gold:** fica nos testes do dbt (`assert_gold_days_complete`), com a mesma
@@ -48,6 +48,7 @@ with DAG(
             config.INGESTION_IMAGE,
             ["run", source, "--date", TARGET_DATE],
             config.INGESTION_ENV,
+            private_environment=config.SOURCE_SECRETS.get(source),
         )
         # Local: Hive Metastore via Trino. Na AWS este passo vira o Glue Crawler.
         registered[source] = container_task(
@@ -64,8 +65,8 @@ with DAG(
             config.DBT_IMAGE,
             [
                 "build",
-                "--select",
-                f"@source:{domain}",
+                "--selector",
+                domain,
                 "--vars",
                 '{"start_date": "' + TARGET_DATE + '"}',
             ],
