@@ -34,10 +34,23 @@ def dag_bag_with_env(monkeypatch):
 
 @pytest.fixture
 def multi_source_dag(dag_bag_with_env):
-    """A DAG montada com duas fontes configuradas."""
+    """A DAG com uma fonte a mais, que nenhum domínio do dbt lê."""
     bag = dag_bag_with_env(
-        {"BIGDATA_INGESTION_SOURCES": "open_meteo, outra_fonte", "BIGDATA_DBT_SOURCES": "open_meteo"}
+        {"BIGDATA_INGESTION_SOURCES": "open_meteo, open_meteo_locations, outra_fonte"}
     )
+    return bag.get_dag("weather_pipeline")
+
+
+@pytest.fixture
+def multi_domain_dag(monkeypatch):
+    """A DAG com dois domínios do dbt, cada um lendo fontes diferentes."""
+    monkeypatch.setattr(
+        config,
+        "DBT_DOMAINS",
+        {"open_meteo": ("open_meteo", "open_meteo_locations"), "outro": ("open_meteo_locations",)},
+    )
+    bag = DagBag(dag_folder=DAGS_FOLDER)
+    assert bag.import_errors == {}
     return bag.get_dag("weather_pipeline")
 
 
@@ -50,11 +63,12 @@ def test_weather_pipeline_dependencies(dag_bag):
 
     for source in ("open_meteo", "open_meteo_locations"):
         assert dag.get_task(f"ingest_{source}").downstream_task_ids == {f"register_{source}"}
-    assert dag.get_task("dbt_build").upstream_task_ids == {
+    assert dag.get_task("dbt_build_open_meteo").upstream_task_ids == {
         "register_open_meteo",
         "register_open_meteo_locations",
     }
-    assert dag.get_task("validate_gold").upstream_task_ids == {"dbt_build"}
+    assert dag.get_task("dbt_build_open_meteo").downstream_task_ids == set()
+    assert "validate_gold" not in dag.task_ids
 
 
 def test_weather_pipeline_runs_one_at_a_time(dag_bag):
@@ -67,7 +81,7 @@ def test_weather_pipeline_runs_one_at_a_time(dag_bag):
 def test_containers_run_on_platform_network(dag_bag):
     dag = dag_bag.get_dag("weather_pipeline")
 
-    for task_id in ("ingest_open_meteo", "register_open_meteo", "dbt_build"):
+    for task_id in ("ingest_open_meteo", "register_open_meteo", "dbt_build_open_meteo"):
         task = dag.get_task(task_id)
         assert task.network_mode == "bigdata"
         assert task.auto_remove == "force"
@@ -77,8 +91,7 @@ def test_every_step_processes_the_previous_day(dag_bag):
     dag = dag_bag.get_dag("weather_pipeline")
 
     assert "macros.ds_add(ds, -1)" in " ".join(dag.get_task("ingest_open_meteo").command)
-    assert "macros.ds_add(ds, -1)" in " ".join(dag.get_task("dbt_build").command)
-    assert "macros.ds_add(ds, -1)" in dag.get_task("validate_gold").sql
+    assert "macros.ds_add(ds, -1)" in " ".join(dag.get_task("dbt_build_open_meteo").command)
 
 
 def test_each_source_has_its_own_chain(multi_source_dag):
@@ -96,8 +109,24 @@ def test_each_source_has_its_own_chain(multi_source_dag):
 def test_dbt_waits_only_for_the_sources_it_reads(multi_source_dag):
     dag = multi_source_dag
 
-    assert dag.get_task("dbt_build").upstream_task_ids == {"register_open_meteo"}
+    assert "register_outra_fonte" not in dag.get_task("dbt_build_open_meteo").upstream_task_ids
     assert dag.get_task("register_outra_fonte").downstream_task_ids == set()
+
+
+def test_dbt_build_selects_only_its_domain(dag_bag):
+    task = dag_bag.get_dag("weather_pipeline").get_task("dbt_build_open_meteo")
+
+    assert task.command[:3] == ["build", "--select", "@source:open_meteo"]
+
+
+def test_each_dbt_domain_is_independent(multi_domain_dag):
+    dag = multi_domain_dag
+
+    assert dag.get_task("dbt_build_outro").upstream_task_ids == {"register_open_meteo_locations"}
+    assert dag.get_task("dbt_build_outro").command[2] == "@source:outro"
+    # Nenhum build de domínio depende de outro.
+    assert not dag.get_task("dbt_build_open_meteo").upstream_task_ids & {"dbt_build_outro"}
+    assert not dag.get_task("dbt_build_outro").upstream_task_ids & {"dbt_build_open_meteo"}
 
 
 @pytest.mark.parametrize("value", ["", " , ", "open_meteo,open_meteo"])
@@ -106,9 +135,9 @@ def test_invalid_source_list_is_rejected(value):
         config.parse_sources("BIGDATA_INGESTION_SOURCES", value)
 
 
-def test_dbt_source_without_ingestion_is_rejected():
+def test_dbt_domain_without_ingestion_is_rejected():
     with pytest.raises(ValueError, match="sem_ingestao"):
-        config.dbt_sources(("open_meteo",), "open_meteo,sem_ingestao")
+        config.check_dbt_domains({"open_meteo": ("open_meteo", "sem_ingestao")}, ("open_meteo",))
 
 
 def test_containers_receive_the_platform_contract(dag_bag):
@@ -116,7 +145,7 @@ def test_containers_receive_the_platform_contract(dag_bag):
     platform = config.load_platform_env("/opt/airflow/tests/fixtures/platform.env")
 
     assert dag.get_task("ingest_open_meteo").environment == platform
-    dbt_env = dag.get_task("dbt_build").environment
+    dbt_env = dag.get_task("dbt_build_open_meteo").environment
     assert dbt_env["SILVER_BUCKET"] == "bigdata-local-silver"
     assert dbt_env["DBT_TARGET"] == "local"
 
