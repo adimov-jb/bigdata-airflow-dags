@@ -81,6 +81,10 @@ docker compose run --rm --build tests
 
 Verificam que a DAG importa sem erros, a ordem das tasks, a cadeia de cada fonte, que o dbt só espera as fontes que lê, `max_active_runs`/`catchup`, a rede dos containers e que todas as etapas usam D-1.
 
+## CI
+
+O workflow [`.github/workflows/ci.yml`](.github/workflows/ci.yml) roda em todo PR e em todo push para a `main`, com o mesmo comando de testes acima. A `main` é protegida: só recebe mudanças por PR, e o check `testes` precisa passar antes do merge.
+
 ## Como o Airflow executa containers
 
 As tasks precisam criar containers no Docker do host. Em vez de montar o `docker.sock` inteiro no Airflow, o serviço `docker-proxy` (tecnativa/docker-socket-proxy) libera só as rotas de containers e imagens. O `DockerOperator` fala com ele em `tcp://docker-proxy:2375`, e os containers das tasks entram na rede `bigdata` para acessar LocalStack e Trino.
