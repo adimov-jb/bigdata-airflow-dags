@@ -83,7 +83,7 @@ Verificam que a DAG importa sem erros, a ordem das tasks, a cadeia de cada fonte
 
 ## CI
 
-O workflow [`.github/workflows/ci.yml`](.github/workflows/ci.yml) roda em todo PR e em todo push para a `main`, com o mesmo comando de testes acima. A `main` é protegida: só recebe mudanças por PR, e o check `testes` precisa passar antes do merge.
+O workflow [`.github/workflows/ci.yml`](.github/workflows/ci.yml) roda em todo PR e em todo push para a `main`, com o mesmo comando de testes acima.
 
 ## Como o Airflow executa containers
 
