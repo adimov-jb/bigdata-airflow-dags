@@ -3,14 +3,18 @@
 Airflow 3.3 (LocalExecutor) em Docker, com a DAG `weather_pipeline`, que liga os outros repositórios:
 
 ```
-ingest_open_meteo ──> register_bronze_catalog ──> dbt_build ──> validate_gold
- (bigdata-ingestion)    (bigdata-ingestion)      (bigdata-dbt)     (SQL no Trino)
+ingest_open_meteo ──> register_open_meteo ──> dbt_build ──> validate_gold
+ingest_<fonte>    ──> register_<fonte>          (bigdata-dbt)   (SQL no Trino)
+      ...                  ...
+(bigdata-ingestion)   (bigdata-ingestion)
 ```
+
+Cada fonte tem uma cadeia própria. O `dbt_build` só depende das fontes que o dbt lê.
 
 | Task | O que faz | Equivalente na AWS |
 |---|---|---|
-| `ingest_open_meteo` | `ingestion run --date D-1`: API → Parquet na bronze | `EcsRunTaskOperator` |
-| `register_bronze_catalog` | `ingestion register-local`: tabela e partições no Hive Metastore | `GlueCrawlerOperator` |
+| `ingest_<fonte>` | `ingestion run <fonte> --date D-1`: fonte → Parquet na bronze (uma task por fonte) | `EcsRunTaskOperator` |
+| `register_<fonte>` | `ingestion register-local <fonte>`: tabela e partições no Hive Metastore | `GlueCrawlerOperator` |
 | `dbt_build` | `dbt build --vars '{"start_date": "D-1"}'`: silver e gold (Iceberg) com testes | `EcsRunTaskOperator` |
 | `validate_gold` | Falha se o dia não chegou à gold ou se falta alguma hora em alguma cidade | `AthenaOperator` / SQL check |
 
@@ -18,6 +22,8 @@ ingest_open_meteo ──> register_bronze_catalog ──> dbt_build ──> vali
 - **Idempotente:** reexecutar um run ou fazer backfill não duplica dados (a partição é sobrescrita e o dbt faz merge).
 - **Um run por vez** (`max_active_runs=1`), porque commits Iceberg simultâneos na mesma tabela conflitam.
 - **Tentativas:** 2 novas tentativas por task, com 2 minutos de intervalo.
+- **Fontes independentes:** cada fonte de `BIGDATA_INGESTION_SOURCES` (`.env.local`) roda sua cadeia `ingest_<fonte>` → `register_<fonte>` em paralelo, com retry e log próprios. Uma fonte não espera nenhuma outra.
+- **dbt só espera o que lê:** o `dbt_build` depende apenas das fontes de `BIGDATA_DBT_SOURCES`. Se uma fonte fora dessa lista falhar, o run fica marcado como falho, mas a gold é atualizada normalmente.
 - **Containers:** as tasks de ingestão e dbt executam as **imagens dos outros repositórios** com `DockerOperator`. O Airflow não instala nem o dbt nem o código de ingestão.
 
 ## Pré-requisitos
@@ -58,6 +64,13 @@ docker compose exec airflow-scheduler airflow backfill create --dag-id weather_p
 # Reexecutar uma task e as seguintes: na UI, abra o run → task → "Clear" (com "Downstream")
 ```
 
+### Adicionar uma fonte
+
+1. Crie a fonte no repositório `ingestion-python` e reconstrua a imagem `bigdata-ingestion:local`.
+2. Inclua o nome dela em `BIGDATA_INGESTION_SOURCES`, no `.env.local`. Os nomes são os de `ingestion list`, separados por vírgula.
+3. Se o dbt passar a ler essa fonte, inclua o nome também em `BIGDATA_DBT_SOURCES`. A DAG não carrega se essa lista tiver uma fonte que não está em `BIGDATA_INGESTION_SOURCES`.
+4. Recrie os containers do Airflow com `docker compose up -d`. As tasks `ingest_<fonte>` e `register_<fonte>` aparecem na DAG.
+
 Os logs de cada task ficam na UI e em `logs/`. Os containers das tasks são removidos no fim da execução, mesmo quando falham, porque a saída deles já foi para o log.
 
 ## Testes
@@ -66,7 +79,7 @@ Os logs de cada task ficam na UI e em `logs/`. Os containers das tasks são remo
 docker compose run --rm --build tests
 ```
 
-Verificam que a DAG importa sem erros, a ordem das tasks, `max_active_runs`/`catchup`, a rede dos containers e que todas as etapas usam D-1.
+Verificam que a DAG importa sem erros, a ordem das tasks, a cadeia de cada fonte, que o dbt só espera as fontes que lê, `max_active_runs`/`catchup`, a rede dos containers e que todas as etapas usam D-1.
 
 ## Como o Airflow executa containers
 
@@ -77,7 +90,7 @@ As tasks precisam criar containers no Docker do host. Em vez de montar o `docker
 ```
 dags/
   weather_pipeline.py        a DAG
-  bigdata_pipeline/config.py imagens, rede e variáveis repassadas aos containers
+  bigdata_pipeline/config.py imagens, rede, fontes de ingestão e variáveis repassadas aos containers
   .airflowignore             evita que o Airflow procure DAGs em bigdata_pipeline/
 tests/                       testes de integridade da DAG
 docker-compose.yml           Postgres, docker-proxy, api-server, scheduler e dag-processor

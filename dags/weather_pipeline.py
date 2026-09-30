@@ -1,7 +1,12 @@
 """
 ### Pipeline diário do tempo (Open-Meteo)
 
-`ingest_open_meteo` → `register_bronze_catalog` → `dbt_build` → `validate_gold`
+`ingest_<fonte>` → `register_<fonte>` (uma cadeia por fonte) → `dbt_build` → `validate_gold`
+
+- **Fontes independentes:** cada fonte de `BIGDATA_INGESTION_SOURCES` tem sua própria cadeia
+  `ingest_<fonte>` → `register_<fonte>`, em paralelo, com retry e log próprios.
+- **dbt só espera o que usa:** `dbt_build` depende apenas das fontes de `BIGDATA_DBT_SOURCES`.
+  A falha de outra fonte marca o run como falho, mas não bloqueia a gold.
 
 - **Dia processado:** o run de D processa **D-1** (UTC), já completo na API.
 - **Idempotente:** a ingestão sobrescreve a partição do dia e o dbt faz merge, então
@@ -45,20 +50,22 @@ with DAG(
     tags=["bigdata", "open-meteo"],
     doc_md=__doc__,
 ) as dag:
-    ingest = container_task(
-        "ingest_open_meteo",
-        config.INGESTION_IMAGE,
-        ["run", "--date", TARGET_DATE],
-        config.INGESTION_ENV,
-    )
-
-    # Local: Hive Metastore via Trino. Na AWS este passo vira o Glue Crawler.
-    register_catalog = container_task(
-        "register_bronze_catalog",
-        config.INGESTION_IMAGE,
-        ["register-local"],
-        config.INGESTION_ENV,
-    )
+    registered = {}
+    for source in config.INGESTION_SOURCES:
+        ingest = container_task(
+            f"ingest_{source}",
+            config.INGESTION_IMAGE,
+            ["run", source, "--date", TARGET_DATE],
+            config.INGESTION_ENV,
+        )
+        # Local: Hive Metastore via Trino. Na AWS este passo vira o Glue Crawler.
+        registered[source] = container_task(
+            f"register_{source}",
+            config.INGESTION_IMAGE,
+            ["register-local", source],
+            config.INGESTION_ENV,
+        )
+        ingest >> registered[source]
 
     dbt_build = container_task(
         "dbt_build",
@@ -78,4 +85,4 @@ with DAG(
         """,
     )
 
-    ingest >> register_catalog >> dbt_build >> validate_gold
+    [registered[source] for source in config.DBT_SOURCES] >> dbt_build >> validate_gold
