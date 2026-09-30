@@ -25,12 +25,14 @@ def parse_sources(variable: str, value: str) -> tuple[str, ...]:
     return sources
 
 
-def dbt_sources(ingestion_sources: tuple[str, ...], value: str) -> tuple[str, ...]:
-    sources = parse_sources("BIGDATA_DBT_SOURCES", value)
-    unknown = [name for name in sources if name not in ingestion_sources]
-    if unknown:
-        raise ValueError(f"BIGDATA_DBT_SOURCES sem ingestão configurada: {unknown}")
-    return sources
+def check_dbt_domains(
+    domains: dict[str, tuple[str, ...]], ingestion_sources: tuple[str, ...]
+) -> dict[str, tuple[str, ...]]:
+    for domain, sources in domains.items():
+        unknown = [name for name in sources if name not in ingestion_sources]
+        if not sources or unknown:
+            raise ValueError(f"DBT_DOMAINS[{domain!r}] com fontes sem ingestão: {unknown or 'nenhuma'}")
+    return domains
 
 
 def load_platform_env(path: str) -> dict[str, str]:
@@ -59,9 +61,12 @@ INGESTION_SOURCES = parse_sources(
     "BIGDATA_INGESTION_SOURCES",
     os.getenv("BIGDATA_INGESTION_SOURCES", "open_meteo,open_meteo_locations"),
 )
-# Fontes de ingestão lidas pelo dbt; só elas bloqueiam o dbt_build.
-DBT_SOURCES = dbt_sources(
-    INGESTION_SOURCES, os.getenv("BIGDATA_DBT_SOURCES", "open_meteo,open_meteo_locations")
+# Domínios do dbt (nome da source no projeto dbt) → fontes de ingestão que cada um lê.
+# Cada domínio vira uma task dbt_build_<domínio> (`dbt build --select @source:<domínio>`),
+# que espera só as suas fontes: a falha de um domínio não trava a gold de outro.
+DBT_DOMAINS = check_dbt_domains(
+    {"open_meteo": ("open_meteo", "open_meteo_locations")},
+    INGESTION_SOURCES,
 )
 
 def parse_emails(value: str) -> tuple[str, ...]:

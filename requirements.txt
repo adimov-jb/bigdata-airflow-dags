@@ -1,6 +1,4 @@
 # Local: executa as imagens de ingestão e dbt como containers.
 apache-airflow-providers-docker
-# Local: validação SQL no Trino.
-apache-airflow-providers-trino
 # Alerta de falha por e-mail (SmtpNotifier).
 apache-airflow-providers-smtp

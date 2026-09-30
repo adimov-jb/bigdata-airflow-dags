@@ -3,27 +3,27 @@
 Airflow 3.3 (LocalExecutor) em Docker, com duas DAGs: `weather_pipeline`, que liga os outros repositórios, e `bronze_freshness`, que monitora se os dados continuam chegando (veja [Alertas e monitoramento](#alertas-e-monitoramento)).
 
 ```
-ingest_open_meteo ──> register_open_meteo ──> dbt_build ──> validate_gold
-ingest_<fonte>    ──> register_<fonte>          (bigdata-dbt)   (SQL no Trino)
-      ...                  ...
-(bigdata-ingestion)   (bigdata-ingestion)
+ingest_open_meteo           ──> register_open_meteo           ──┐
+ingest_open_meteo_locations ──> register_open_meteo_locations ──┴──> dbt_build_open_meteo
+ingest_<fonte>              ──> register_<fonte>              ────> dbt_build_<domínio>
+         (bigdata-ingestion)            (bigdata-ingestion)             (bigdata-dbt)
 ```
 
-Cada fonte tem uma cadeia própria. O `dbt_build` só depende das fontes que o dbt lê.
+Cada fonte tem uma cadeia própria. Cada domínio do dbt tem seu próprio build, que espera só as fontes que ele lê.
 
 | Task | O que faz | Equivalente na AWS |
 |---|---|---|
 | `ingest_<fonte>` | `ingestion run <fonte> --date D-1`: fonte → Parquet na bronze (uma task por fonte) | `EcsRunTaskOperator` |
 | `register_<fonte>` | `ingestion register-local <fonte>`: tabela e partições no Hive Metastore | `GlueCrawlerOperator` |
-| `dbt_build` | `dbt build --vars '{"start_date": "D-1"}'`: silver e gold (Iceberg) com testes | `EcsRunTaskOperator` |
-| `validate_gold` | Falha se o dia não chegou à gold ou se falta alguma hora em alguma cidade | `AthenaOperator` / SQL check |
+| `dbt_build_<domínio>` | `dbt build --select @source:<domínio> --vars '{"start_date": "D-1"}'`: silver e gold (Iceberg) do domínio, com testes. Um dos testes (`assert_gold_days_complete`) falha se o dia não chegou à gold ou se falta alguma hora em alguma cidade | `EcsRunTaskOperator` |
 
 - **Agenda:** todo dia às 03:00 UTC. O run de D processa **D-1**, que a essa hora já está completo na API.
 - **Idempotente:** reexecutar um run ou fazer backfill não duplica dados (a partição é sobrescrita e o dbt faz merge).
 - **Um run por vez** (`max_active_runs=1`), porque commits Iceberg simultâneos na mesma tabela conflitam.
 - **Tentativas:** 2 novas tentativas por task, com 2 minutos de intervalo. Se todas falharem, sai um alerta por e-mail (desligado no ambiente local).
 - **Fontes independentes:** cada fonte de `BIGDATA_INGESTION_SOURCES` (`.env.local`) roda sua cadeia `ingest_<fonte>` → `register_<fonte>` em paralelo, com retry e log próprios. Uma fonte não espera nenhuma outra.
-- **dbt só espera o que lê:** o `dbt_build` depende apenas das fontes de `BIGDATA_DBT_SOURCES`. Se uma fonte fora dessa lista falhar, o run fica marcado como falho, mas a gold é atualizada normalmente.
+- **Um dbt build por domínio:** `DBT_DOMAINS`, em `dags/bigdata_pipeline/config.py`, liga cada domínio do dbt (o nome da source no projeto dbt) às fontes de ingestão que ele lê. Cada domínio tem sua task `dbt_build_<domínio>`, que espera só essas fontes. Se outra fonte ou outro domínio falhar, o run fica marcado como falho, mas a gold desse domínio é atualizada normalmente.
+- **Validação da gold no dbt:** a checagem de dia completo é um teste do dbt, e não uma task do Airflow. Por isso ela roda igual no Trino e no Athena.
 - **Containers:** as tasks de ingestão e dbt executam as **imagens dos outros repositórios** com `DockerOperator`. O Airflow não instala nem o dbt nem o código de ingestão.
 
 ## Pré-requisitos
@@ -69,8 +69,8 @@ docker compose exec airflow-scheduler airflow backfill create --dag-id weather_p
 
 1. Crie a fonte no repositório `ingestion-python` e reconstrua a imagem `bigdata-ingestion:local`.
 2. Inclua o nome dela em `BIGDATA_INGESTION_SOURCES`, no `.env.local`. Os nomes são os de `ingestion list`, separados por vírgula.
-3. Se o dbt passar a ler essa fonte, inclua o nome também em `BIGDATA_DBT_SOURCES`. A DAG não carrega se essa lista tiver uma fonte que não está em `BIGDATA_INGESTION_SOURCES`.
-4. Recrie os containers do Airflow com `docker compose up -d`. As tasks `ingest_<fonte>` e `register_<fonte>` aparecem na DAG.
+3. Se o dbt passar a ler essa fonte, inclua-a no domínio correspondente em `DBT_DOMAINS` (`dags/bigdata_pipeline/config.py`). Um domínio novo no dbt (uma source nova) vira uma entrada nova ali. A DAG não carrega se um domínio citar uma fonte que não está em `BIGDATA_INGESTION_SOURCES`.
+4. Recrie os containers do Airflow com `docker compose up -d`. As tasks `ingest_<fonte>`, `register_<fonte>` e, se houver domínio novo, `dbt_build_<domínio>` aparecem na DAG.
 
 Os logs de cada task ficam na UI e em `logs/`. Os containers das tasks são removidos no fim da execução, mesmo quando falham, porque a saída deles já foi para o log.
 
@@ -80,7 +80,7 @@ Os logs de cada task ficam na UI e em `logs/`. Os containers das tasks são remo
 docker compose run --rm --build tests
 ```
 
-Verificam que as DAGs importam sem erros, a cadeia de cada fonte, que o dbt só espera as fontes que lê, `max_active_runs`/`catchup`, a rede dos containers, que todas as etapas usam D-1, o contrato da plataforma e os alertas: nenhum e-mail no ambiente local, e e-mail em todas as tasks fora dele.
+Verificam que as DAGs importam sem erros, a cadeia de cada fonte, que cada domínio do dbt tem seu build e só espera as fontes que lê, `max_active_runs`/`catchup`, a rede dos containers, que todas as etapas usam D-1, o contrato da plataforma e os alertas: nenhum e-mail no ambiente local, e e-mail em todas as tasks fora dele.
 
 ## CI
 
@@ -107,7 +107,7 @@ As tasks precisam criar containers no Docker do host. Em vez de montar o `docker
 
 ```
 dags/
-  weather_pipeline.py        pipeline diário: ingestão → catálogo → dbt → validação
+  weather_pipeline.py        pipeline diário: ingestão → catálogo → dbt build por domínio (com os testes da gold)
   bronze_freshness.py        freshness diária da bronze (dbt source freshness)
   bigdata_pipeline/config.py imagens, rede, fontes, contrato da plataforma e destinatários dos alertas
   bigdata_pipeline/tasks.py  argumentos padrão das DAGs (tentativas e alerta) e tasks de container
@@ -120,4 +120,4 @@ docker-compose.yml           Postgres, docker-proxy, api-server, scheduler e dag
 
 ## Na AWS
 
-As tasks de container viram `EcsRunTaskOperator` (as mesmas imagens, publicadas no ECR), o registro vira `GlueCrawlerOperator` e a validação roda no Athena. Isso depende dos módulos `network`, `ecr` e `ecs` do Terraform, que ainda serão escritos quando houver conta AWS.
+As tasks de container viram `EcsRunTaskOperator` (as mesmas imagens, publicadas no ECR), e o registro vira `GlueCrawlerOperator`. A validação da gold já é um teste do dbt, então roda no Athena sem mudança no Airflow. Isso depende dos módulos `network`, `ecr` e `ecs` do Terraform, que ainda serão escritos quando houver conta AWS.
