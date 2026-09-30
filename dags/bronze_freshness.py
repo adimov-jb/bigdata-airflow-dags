@@ -1,7 +1,7 @@
 """
 ### Freshness da bronze
 
-Roda `dbt source freshness` todo dia às 12:00 UTC, fora do `weather_pipeline`, para
+Roda `dbt source freshness` todo dia às 12:00 UTC, fora do `bigdata_daily`, para
 detectar quando o pipeline para de trazer dados: DAG pausada, falhas seguidas ou
 scheduler parado por um tempo.
 

@@ -1,0 +1,12 @@
+# Atualizações mensais das GitHub Actions, agrupadas num PR. A CI valida cada PR.
+# A imagem do Airflow e os providers não entram aqui: a versão fica em AIRFLOW_VERSION
+# (Dockerfile) e os providers seguem as constraints oficiais dessa versão.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      github-actions:
+        patterns: ["*"]
