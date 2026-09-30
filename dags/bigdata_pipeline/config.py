@@ -6,6 +6,7 @@ terraform apply do repositório Terraform) e são repassados aos containers das 
 """
 
 import os
+import re
 from pathlib import Path
 
 DOCKER_URL = os.getenv("BIGDATA_DOCKER_URL", "tcp://docker-proxy:2375")
@@ -62,6 +63,18 @@ INGESTION_SOURCES = parse_sources(
 DBT_SOURCES = dbt_sources(
     INGESTION_SOURCES, os.getenv("BIGDATA_DBT_SOURCES", "open_meteo,open_meteo_locations")
 )
+
+def parse_emails(value: str) -> tuple[str, ...]:
+    emails = tuple(email.strip() for email in value.split(",") if email.strip())
+    invalid = [email for email in emails if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email)]
+    if invalid:
+        raise ValueError(f"BIGDATA_ALERT_EMAILS com e-mail inválido: {invalid}")
+    return emails
+
+
+# Destinatários do alerta de falha. Vazio desliga o e-mail: o .env.local faz isso, porque
+# o ambiente local não envia e-mail. Fora dele, o envio usa a conexão smtp_default.
+ALERT_EMAILS = parse_emails(os.getenv("BIGDATA_ALERT_EMAILS", "andredimov@hotmail.com"))
 
 PLATFORM_ENV = load_platform_env(PLATFORM_ENV_FILE)
 
