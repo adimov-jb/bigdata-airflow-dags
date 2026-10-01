@@ -1,12 +1,39 @@
-# Airflow — orquestração do pipeline
+# bigdata-airflow-dags — orquestração da plataforma
 
-Airflow 3.3 (LocalExecutor) em Docker, com duas DAGs: `bigdata_daily`, que liga os outros repositórios, e `bronze_freshness`, que monitora se os dados continuam chegando (veja [Alertas e monitoramento](#alertas-e-monitoramento)).
+Orquestração da plataforma com Airflow 3.3 (LocalExecutor) em Docker. São duas DAGs:
+
+- **`bigdata_daily`**: todo dia, ingere as cinco fontes, registra a bronze no catálogo e roda o dbt de cada domínio. Fontes e domínios são independentes entre si.
+- **`bronze_freshness`**: confere se os dados continuam chegando (veja [Alertas e monitoramento](#alertas-e-monitoramento)).
+
+As tasks executam as imagens da ingestão e do dbt em containers. Falhas disparam e-mail, desligado no ambiente local, e as chaves de API chegam só à task da fonte que as usa.
+
+## A plataforma
+
+Este repositório é uma das quatro partes da plataforma de dados **bigdata**. Ela coleta dados públicos de APIs, organiza tudo num data lake em camadas (bronze → silver → gold) e entrega tabelas analíticas validadas. Tudo roda localmente em Docker, com LocalStack, Hive Metastore e Trino no lugar de S3, Glue e Athena, e está preparado para a AWS.
+
+| Repositório | Papel |
+|---|---|
+| [bigdata-terraform](https://github.com/adimov-jb/bigdata-terraform) | Infraestrutura (AWS e local), contrato da plataforma, operação (`scripts/platform.sh`) e runbook |
+| [bigdata-ingestion-python](https://github.com/adimov-jb/bigdata-ingestion-python) | Ingestão das APIs para a camada bronze (Parquet no S3) |
+| [bigdata-dbt-modeling](https://github.com/adimov-jb/bigdata-dbt-modeling) | Camadas silver e gold (Iceberg), relacionamento entre fontes e validação de qualidade |
+| **bigdata-airflow-dags** (este) | Orquestração diária, alertas por e-mail e monitoramento de freshness |
+
+| Domínio | Fontes | Principais tabelas na gold |
+|---|---|---|
+| Clima | [Open-Meteo](https://open-meteo.com/): tempo horário de 10 capitais brasileiras | `fct_weather_daily`, `dim_city` |
+| Países | [Rest Countries v5](https://restcountries.com/) e [Banco Mundial](https://data.worldbank.org/): atributos dos países e indicadores socioeconômicos (PIB, inflação, expectativa de vida, pobreza, população) | `dim_country`, `fct_country_indicators_yearly`, `dq_indicator_coverage` |
+
+Para subir e operar tudo junto, use o `scripts/platform.sh up` do repositório `bigdata-terraform`. Os problemas conhecidos estão no [RUNBOOK](https://github.com/adimov-jb/bigdata-terraform/blob/main/RUNBOOK.md).
+
+## Pipeline diário (`bigdata_daily`)
 
 ```
-ingest_open_meteo           ──> register_open_meteo           ──┐
-ingest_open_meteo_locations ──> register_open_meteo_locations ──┴──> dbt_build_open_meteo
-ingest_<fonte>              ──> register_<fonte>              ────> dbt_build_<domínio>
-         (bigdata-ingestion)            (bigdata-ingestion)             (bigdata-dbt)
+ingest_open_meteo             ──> register_open_meteo             ──┐
+ingest_open_meteo_locations   ──> register_open_meteo_locations   ──┴──> dbt_build_open_meteo
+ingest_rest_countries         ──> register_rest_countries         ──┐
+ingest_world_bank_indicators  ──> register_world_bank_indicators  ──┼──> dbt_build_countries
+ingest_world_bank_countries   ──> register_world_bank_countries   ──┘
+           (bigdata-ingestion)               (bigdata-ingestion)            (bigdata-dbt)
 ```
 
 Cada fonte tem uma cadeia própria. Cada domínio do dbt tem seu próprio build, que espera só as fontes que ele lê.
